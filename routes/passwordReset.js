@@ -4,21 +4,52 @@ const crypto = require('crypto');
 const User = require('../models/User');
 const nodemailer = require('nodemailer');
 
-// Configure email transporter
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-    }
-});
+// Email transporter (will be set up when server starts)
+let transporter;
 
-// Request password reset
+// Function to create test email account
+async function setupEmailTransporter() {
+    try {
+        // Create a fake test account on Ethereal
+        const testAccount = await nodemailer.createTestAccount();
+        
+        // Set up the transporter using the test account
+        transporter = nodemailer.createTransport({
+            host: 'smtp.ethereal.email',
+            port: 587,
+            secure: false,
+            auth: {
+                user: testAccount.user,
+                pass: testAccount.pass
+            }
+        });
+        
+        console.log('✅ Email system ready (using Ethereal test email)');
+        console.log('📧 Test email account:', testAccount.user);
+        console.log('🔑 Test email password:', testAccount.pass);
+        console.log('💡 Password reset emails will show preview URL in logs');
+        
+    } catch (error) {
+        console.error('❌ Failed to setup email:', error.message);
+    }
+}
+
+// Call this when server starts
+setupEmailTransporter();
+
+// Request password reset - Step 1: User enters email
 router.post('/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
         
+        if (!email) {
+            return res.status(400).json({ error: 'Email is required' });
+        }
+        
+        // Find user (case-insensitive)
         const user = await User.findOne({ email: email.toLowerCase() });
+        
+        // For security, don't reveal if email exists
         if (!user) {
             return res.json({ 
                 success: true, 
@@ -26,24 +57,27 @@ router.post('/forgot-password', async (req, res) => {
             });
         }
         
+        // Generate password reset token
         const resetToken = crypto.randomBytes(32).toString('hex');
-        const resetExpiry = Date.now() + 3600000;
+        const resetExpiry = Date.now() + 3600000; // 1 hour from now
         
+        // Save token to user record
         user.resetPasswordToken = resetToken;
         user.resetPasswordExpires = resetExpiry;
         await user.save();
         
-        const resetUrl = `${process.env.FRONTEND_URL}/reset-password.html?token=${resetToken}`;
+        // Create reset URL
+        const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password.html?token=${resetToken}`;
         
+        // Email content
         const mailOptions = {
             to: user.email,
-            from: process.env.EMAIL_USER,
             subject: 'clubeasa - Password Reset Request',
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #0a0a0f, #1a1a2e); color: #fff; border-radius: 16px;">
                     <div style="text-align: center; margin-bottom: 30px;">
-                        <h1 style="color: #00d4ff;">clubeasa</h1>
-                        <p style="color: #00d4ff;">EASA Exam Preparation</p>
+                        <h1 style="color: #00d4ff; margin: 0;">clubeasa</h1>
+                        <p style="color: #00d4ff; margin: 0;">EASA Exam Preparation</p>
                     </div>
                     
                     <h2>Password Reset Request</h2>
@@ -51,7 +85,7 @@ router.post('/forgot-password', async (req, res) => {
                     <p>We received a request to reset your password for your clubeasa account.</p>
                     
                     <div style="text-align: center; margin: 30px 0;">
-                        <a href="${resetUrl}" style="background: linear-gradient(135deg, #00d4ff, #0099cc); color: white; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: bold;">Reset Password</a>
+                        <a href="${resetUrl}" style="background: linear-gradient(135deg, #00d4ff, #0099cc); color: white; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Reset Password</a>
                     </div>
                     
                     <p>Or copy this link: <a href="${resetUrl}" style="color: #00d4ff;">${resetUrl}</a></p>
@@ -66,23 +100,38 @@ router.post('/forgot-password', async (req, res) => {
             `
         };
         
-        await transporter.sendMail(mailOptions);
+        // Send the email
+        const info = await transporter.sendMail(mailOptions);
         
+        // Get the preview URL (Ethereal specific)
+        const previewUrl = nodemailer.getTestMessageUrl(info);
+        
+        console.log('📧 Password reset email sent to:', user.email);
+        console.log('🔗 Preview URL (copy this to see the email):', previewUrl);
+        
+        // Return success with preview URL (for testing)
         res.json({ 
             success: true, 
-            message: 'If your email is registered, you will receive a reset link' 
+            message: 'Reset link ready! Check the Render logs for the preview URL.',
+            previewUrl: previewUrl
         });
         
     } catch (error) {
         console.error('Forgot password error:', error);
-        res.status(500).json({ error: 'Failed to process request' });
+        res.status(500).json({ 
+            error: 'Failed to send reset email. Please try again later.' 
+        });
     }
 });
 
-// Verify reset token
+// Verify reset token - Step 2: Check if token is valid
 router.post('/verify-token', async (req, res) => {
     try {
         const { token } = req.body;
+        
+        if (!token) {
+            return res.status(400).json({ error: 'Token is required' });
+        }
         
         const user = await User.findOne({
             resetPasswordToken: token,
@@ -101,11 +150,20 @@ router.post('/verify-token', async (req, res) => {
     }
 });
 
-// Reset password
+// Reset password - Step 3: Set new password
 router.post('/reset-password', async (req, res) => {
     try {
         const { token, newPassword } = req.body;
         
+        if (!token || !newPassword) {
+            return res.status(400).json({ error: 'Token and new password are required' });
+        }
+        
+        if (newPassword.length < 6) {
+            return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        }
+        
+        // Find user with valid token
         const user = await User.findOne({
             resetPasswordToken: token,
             resetPasswordExpires: { $gt: Date.now() }
@@ -115,10 +173,13 @@ router.post('/reset-password', async (req, res) => {
             return res.status(400).json({ error: 'Invalid or expired reset token' });
         }
         
+        // Update password
         user.password = newPassword;
         user.resetPasswordToken = null;
         user.resetPasswordExpires = null;
         await user.save();
+        
+        console.log('✅ Password reset successfully for:', user.email);
         
         res.json({ success: true, message: 'Password has been reset successfully' });
         
