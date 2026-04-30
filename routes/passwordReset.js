@@ -2,42 +2,8 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const User = require('../models/User');
-const nodemailer = require('nodemailer');
 
-// Email transporter (will be set up when server starts)
-let transporter;
-
-// Function to create test email account
-async function setupEmailTransporter() {
-    try {
-        // Create a fake test account on Ethereal
-        const testAccount = await nodemailer.createTestAccount();
-        
-        // Set up the transporter using the test account
-        transporter = nodemailer.createTransport({
-            host: 'smtp.ethereal.email',
-            port: 587,
-            secure: false,
-            auth: {
-                user: testAccount.user,
-                pass: testAccount.pass
-            }
-        });
-        
-        console.log('✅ Email system ready (using Ethereal test email)');
-        console.log('📧 Test email account:', testAccount.user);
-        console.log('🔑 Test email password:', testAccount.pass);
-        console.log('💡 Password reset emails will show preview URL in logs');
-        
-    } catch (error) {
-        console.error('❌ Failed to setup email:', error.message);
-    }
-}
-
-// Call this when server starts
-setupEmailTransporter();
-
-// Request password reset - Step 1: User enters email
+// Request password reset - Returns reset link directly (no email needed)
 router.post('/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
@@ -66,65 +32,28 @@ router.post('/forgot-password', async (req, res) => {
         user.resetPasswordExpires = resetExpiry;
         await user.save();
         
-        // Create reset URL
-        const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password.html?token=${resetToken}`;
+        // Create reset URL - USING password.html (not reset-password.html)
+        const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/password.html?token=${resetToken}`;
         
-        // Email content
-        const mailOptions = {
-            to: user.email,
-            subject: 'clubeasa - Password Reset Request',
-            html: `
-                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #0a0a0f, #1a1a2e); color: #fff; border-radius: 16px;">
-                    <div style="text-align: center; margin-bottom: 30px;">
-                        <h1 style="color: #00d4ff; margin: 0;">clubeasa</h1>
-                        <p style="color: #00d4ff; margin: 0;">EASA Exam Preparation</p>
-                    </div>
-                    
-                    <h2>Password Reset Request</h2>
-                    <p>Hello ${user.name},</p>
-                    <p>We received a request to reset your password for your clubeasa account.</p>
-                    
-                    <div style="text-align: center; margin: 30px 0;">
-                        <a href="${resetUrl}" style="background: linear-gradient(135deg, #00d4ff, #0099cc); color: white; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Reset Password</a>
-                    </div>
-                    
-                    <p>Or copy this link: <a href="${resetUrl}" style="color: #00d4ff;">${resetUrl}</a></p>
-                    
-                    <p>This link will expire in <strong>1 hour</strong>.</p>
-                    
-                    <p>If you didn't request this, please ignore this email.</p>
-                    
-                    <hr style="border-color: rgba(255,255,255,0.1); margin: 20px 0;">
-                    <p style="font-size: 12px; color: #888;">Stay safe,<br>The clubeasa Team</p>
-                </div>
-            `
-        };
+        console.log('🔐 Password reset token generated for:', user.email);
+        console.log('🔗 Reset link:', resetUrl);
         
-        // Send the email
-        const info = await transporter.sendMail(mailOptions);
-        
-        // Get the preview URL (Ethereal specific)
-        const previewUrl = nodemailer.getTestMessageUrl(info);
-        
-        console.log('📧 Password reset email sent to:', user.email);
-        console.log('🔗 Preview URL (copy this to see the email):', previewUrl);
-        
-        // Return success with preview URL (for testing)
+        // Return the reset link directly in the response
         res.json({ 
             success: true, 
-            message: 'Reset link ready! Check the Render logs for the preview URL.',
-            previewUrl: previewUrl
+            message: 'Reset link generated successfully!',
+            resetUrl: resetUrl
         });
         
     } catch (error) {
         console.error('Forgot password error:', error);
         res.status(500).json({ 
-            error: 'Failed to send reset email. Please try again later.' 
+            error: 'Failed to generate reset link. Please try again.' 
         });
     }
 });
 
-// Verify reset token - Step 2: Check if token is valid
+// Verify reset token
 router.post('/verify-token', async (req, res) => {
     try {
         const { token } = req.body;
@@ -150,7 +79,7 @@ router.post('/verify-token', async (req, res) => {
     }
 });
 
-// Reset password - Step 3: Set new password
+// Reset password
 router.post('/reset-password', async (req, res) => {
     try {
         const { token, newPassword } = req.body;
@@ -163,7 +92,6 @@ router.post('/reset-password', async (req, res) => {
             return res.status(400).json({ error: 'Password must be at least 6 characters' });
         }
         
-        // Find user with valid token
         const user = await User.findOne({
             resetPasswordToken: token,
             resetPasswordExpires: { $gt: Date.now() }
