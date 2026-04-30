@@ -23,7 +23,29 @@ router.post('/forgot-password', async (req, res) => {
             });
         }
         
-        // Generate password reset token
+        // Check if there's already a valid token
+        if (user.resetPasswordToken && user.resetPasswordExpires > Date.now()) {
+            // Calculate remaining time
+            const remainingMs = user.resetPasswordExpires - Date.now();
+            const remainingMinutes = Math.ceil(remainingMs / 60000);
+            const remainingHours = Math.floor(remainingMinutes / 60);
+            const remainingMins = remainingMinutes % 60;
+            
+            let timeMessage = '';
+            if (remainingHours > 0) {
+                timeMessage = `${remainingHours} hour${remainingHours > 1 ? 's' : ''} and ${remainingMins} minute${remainingMins > 1 ? 's' : ''}`;
+            } else {
+                timeMessage = `${remainingMinutes} minute${remainingMinutes > 1 ? 's' : ''}`;
+            }
+            
+            return res.json({ 
+                success: false,
+                error: `A reset link was already sent. Please try again after ${timeMessage}.`,
+                remainingMinutes: remainingMinutes
+            });
+        }
+        
+        // Generate new password reset token
         const resetToken = crypto.randomBytes(32).toString('hex');
         const resetExpiry = Date.now() + 3600000; // 1 hour from now
         
@@ -32,7 +54,7 @@ router.post('/forgot-password', async (req, res) => {
         user.resetPasswordExpires = resetExpiry;
         await user.save();
         
-        // Create reset URL - USING password.html (not reset-password.html)
+        // Create reset URL - USING password.html
         const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/password.html?token=${resetToken}`;
         
         console.log('🔐 Password reset token generated for:', user.email);
@@ -41,7 +63,7 @@ router.post('/forgot-password', async (req, res) => {
         // Return the reset link directly in the response
         res.json({ 
             success: true, 
-            message: 'Reset link generated successfully!',
+            message: 'Reset link generated successfully! Use the link below.',
             resetUrl: resetUrl
         });
         
