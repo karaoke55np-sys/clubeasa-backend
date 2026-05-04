@@ -1,25 +1,10 @@
 const express = require('express');
-const router = express.Router();
-const crypto = require('crypto');
-const nodemailer = require('nodemailer');
-const User = require('../models/User');
-
-// ── Email transporter ────────────────────────────────────────
-const transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 465,
-    secure: true,
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-    },
-    tls: {
-        rejectUnauthorized: false
-    }
-});
+const router  = express.Router();
+const crypto  = require('crypto');
+const User    = require('../models/User');
 
 // ── POST /api/password-reset/forgot-password ─────────────────
-// Body: { email }
+// Returns reset link directly — no email needed
 router.post('/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
@@ -27,9 +12,8 @@ router.post('/forgot-password', async (req, res) => {
 
         const user = await User.findOne({ email });
 
-        // Always return success to prevent email enumeration
         if (!user) {
-            return res.json({ message: 'If that email exists, a reset link has been sent.' });
+            return res.status(404).json({ error: 'No account found with that email.' });
         }
 
         // Generate secure token
@@ -42,36 +26,22 @@ router.post('/forgot-password', async (req, res) => {
 
         const resetUrl = `${process.env.FRONTEND_URL}/password.html?token=${token}`;
 
-        await transporter.sendMail({
-            from:    `"clubeasa" <${process.env.EMAIL_USER}>`,
-            to:      email,
-            subject: 'Reset your clubeasa password',
-            html: `
-                <div style="font-family: Arial, sans-serif; max-width: 480px; margin: auto;">
-                    <h2>Password Reset</h2>
-                    <p>You requested a password reset for your clubeasa account.</p>
-                    <p>Click the button below to reset your password. This link expires in <strong>1 hour</strong>.</p>
-                    <a href="${resetUrl}"
-                       style="display:inline-block;padding:12px 24px;background:#4CAF50;color:#fff;
-                              text-decoration:none;border-radius:6px;margin:16px 0;">
-                        Reset Password
-                    </a>
-                    <p style="color:#888;font-size:12px;">If you didn't request this, you can safely ignore this email.</p>
-                </div>
-            `,
-        });
+        console.log(`Password reset link generated for ${email}`);
 
-        console.log(`📧 Password reset email sent to ${email}`);
-        res.json({ message: 'If that email exists, a reset link has been sent.' });
+        // Return the reset URL directly to the frontend
+        res.json({
+            success:  true,
+            resetUrl: resetUrl,
+            message:  'Reset link generated! Click the link below to reset your password.'
+        });
 
     } catch (err) {
         console.error('Forgot password error:', err);
-        res.status(500).json({ error: 'Failed to send reset email. Please try again.' });
+        res.status(500).json({ error: 'Failed to generate reset link. Please try again.' });
     }
 });
 
 // ── POST /api/password-reset/reset-password ──────────────────
-// Body: { token, newPassword }
 router.post('/reset-password', async (req, res) => {
     try {
         const { token, newPassword } = req.body;
@@ -85,14 +55,14 @@ router.post('/reset-password', async (req, res) => {
 
         const user = await User.findOne({
             resetPasswordToken:  token,
-            resetPasswordExpiry: { $gt: new Date() }, // not expired
+            resetPasswordExpiry: { $gt: new Date() },
         });
 
         if (!user) {
             return res.status(400).json({ error: 'Reset link is invalid or has expired.' });
         }
 
-        user.password            = newPassword; // hashed by pre-save hook
+        user.password            = newPassword;
         user.resetPasswordToken  = null;
         user.resetPasswordExpiry = null;
         await user.save();
