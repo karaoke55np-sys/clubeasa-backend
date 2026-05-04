@@ -1,22 +1,20 @@
-const express = require('express');
-const router  = express.Router();
-const crypto  = require('crypto');
-const User    = require('../models/User');
+const express  = require('express');
+const router   = express.Router();
+const crypto   = require('crypto');
+const bcrypt   = require('bcryptjs');
+const User     = require('../models/User');
 
 // ── POST /api/password-reset/forgot-password ─────────────────
-// Returns reset link directly — no email needed
 router.post('/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) return res.status(400).json({ error: 'Email is required.' });
 
         const user = await User.findOne({ email });
-
         if (!user) {
             return res.status(404).json({ error: 'No account found with that email.' });
         }
 
-        // Generate secure token
         const token  = crypto.randomBytes(32).toString('hex');
         const expiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
@@ -25,10 +23,8 @@ router.post('/forgot-password', async (req, res) => {
         await user.save();
 
         const resetUrl = `${process.env.FRONTEND_URL}/password.html?token=${token}`;
+        console.log(`Reset link generated for ${email}`);
 
-        console.log(`Password reset link generated for ${email}`);
-
-        // Return the reset URL directly to the frontend
         res.json({
             success:  true,
             resetUrl: resetUrl,
@@ -62,11 +58,17 @@ router.post('/reset-password', async (req, res) => {
             return res.status(400).json({ error: 'Reset link is invalid or has expired.' });
         }
 
-        user.password            = newPassword;
-        user.resetPasswordToken  = null;
-        user.resetPasswordExpiry = null;
-        await user.save();
+        // Manually hash password to ensure it's always hashed correctly
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
 
+        // Use findByIdAndUpdate to bypass pre-save hook issues
+        await User.findByIdAndUpdate(user._id, {
+            password:            hashedPassword,
+            resetPasswordToken:  null,
+            resetPasswordExpiry: null,
+        });
+
+        console.log(`Password reset successfully for user ${user.email}`);
         res.json({ message: 'Password reset successfully! You can now log in.' });
 
     } catch (err) {
