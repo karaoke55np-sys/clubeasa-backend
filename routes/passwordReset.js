@@ -3,6 +3,7 @@ const router   = express.Router();
 const crypto   = require('crypto');
 const bcrypt   = require('bcryptjs');
 const User     = require('../models/User');
+const { sendPasswordResetEmail } = require('../utils/email');
 
 // ── POST /api/password-reset/forgot-password ─────────────────
 router.post('/forgot-password', async (req, res) => {
@@ -10,9 +11,14 @@ router.post('/forgot-password', async (req, res) => {
         const { email } = req.body;
         if (!email) return res.status(400).json({ error: 'Email is required.' });
 
-        const user = await User.findOne({ email });
+        const normalizedEmail = email.toLowerCase().trim();
+        const user = await User.findOne({ email: normalizedEmail });
+
+        // Always respond with the same generic message (don't leak whether email exists)
+        const genericMessage = 'If an account exists with that email, a password reset link has been sent.';
+
         if (!user) {
-            return res.status(404).json({ error: 'No account found with that email.' });
+            return res.json({ success: true, message: genericMessage });
         }
 
         const token  = crypto.randomBytes(32).toString('hex');
@@ -23,17 +29,20 @@ router.post('/forgot-password', async (req, res) => {
         await user.save();
 
         const resetUrl = `${process.env.FRONTEND_URL}/password.html?token=${token}`;
-        console.log(`Reset link generated for ${email}`);
 
-        res.json({
-            success:  true,
-            resetUrl: resetUrl,
-            message:  'Reset link generated! Click the link below to reset your password.'
-        });
+        try {
+            await sendPasswordResetEmail(user.email, user.name, resetUrl);
+            console.log(`Password reset email sent to ${user.email}`);
+        } catch (mailErr) {
+            console.error('Failed to send reset email:', mailErr.message);
+            return res.status(500).json({ error: 'Failed to send reset email. Please try again later.' });
+        }
+
+        res.json({ success: true, message: genericMessage });
 
     } catch (err) {
         console.error('Forgot password error:', err);
-        res.status(500).json({ error: 'Failed to generate reset link. Please try again.' });
+        res.status(500).json({ error: 'Failed to send reset link. Please try again.' });
     }
 });
 
@@ -58,17 +67,15 @@ router.post('/reset-password', async (req, res) => {
             return res.status(400).json({ error: 'Reset link is invalid or has expired.' });
         }
 
-        // Manually hash password to ensure it's always hashed correctly
         const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-        // Use findByIdAndUpdate to bypass pre-save hook issues
         await User.findByIdAndUpdate(user._id, {
             password:            hashedPassword,
             resetPasswordToken:  null,
             resetPasswordExpiry: null,
         });
 
-        console.log(`Password reset successfully for user ${user.email}`);
+        console.log(`Password reset successfully for ${user.email}`);
         res.json({ message: 'Password reset successfully! You can now log in.' });
 
     } catch (err) {

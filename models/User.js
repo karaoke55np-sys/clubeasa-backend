@@ -26,7 +26,12 @@ const userSchema = new mongoose.Schema({
     moduleAccess: { type: Map, of: moduleAccessSchema, default: {} },
 
     resetPasswordToken: { type: String, default: null },
-    resetPasswordExpiry: { type: Date, default: null }
+    resetPasswordExpiry: { type: Date, default: null },
+
+    // Email verification
+    isVerified: { type: Boolean, default: false },
+    verificationToken: { type: String, default: null },
+    verificationTokenExpiry: { type: Date, default: null }
 }, { timestamps: true });
 
 userSchema.pre('save', async function (next) {

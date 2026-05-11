@@ -37,9 +37,16 @@ router.post('/create-checkout', authMiddleware, async (req, res) => {
             return res.status(400).json({ error: 'No variant selected. Please select a module and duration.' });
         }
 
-        // Get user email
-        const user = await User.findById(userId).select('email name');
+        // Get user email + verification status
+        const user = await User.findById(userId).select('email name isVerified');
         if (!user) return res.status(404).json({ error: 'User not found.' });
+
+        if (!user.isVerified) {
+            return res.status(403).json({
+                error: 'Please verify your email before purchasing. Check your inbox for the verification link.',
+                needsVerification: true,
+            });
+        }
 
         const payload = {
             data: {
