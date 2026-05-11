@@ -11,12 +11,25 @@ function getTransporter() {
         return null;
     }
 
+    // Explicit SMTP config (instead of service:'gmail') so we can:
+    //   1. Force IPv4 — Render's free tier blocks outbound IPv6 to Gmail SMTP
+    //   2. Use port 587 (STARTTLS) which works reliably on cloud hosts
     transporter = nodemailer.createTransport({
-        service: 'gmail',
+        host:   'smtp.gmail.com',
+        port:   587,
+        secure: false,        // false = STARTTLS upgrade on port 587
+        family: 4,            // force IPv4 (fixes ENETUNREACH on Render)
         auth: {
             user: process.env.EMAIL_USER,
             pass: process.env.EMAIL_PASS,
         },
+        tls: {
+            // Helps with cert chain on some hosts
+            minVersion: 'TLSv1.2',
+        },
+        connectionTimeout: 15000,
+        greetingTimeout:   15000,
+        socketTimeout:     20000,
     });
 
     return transporter;
