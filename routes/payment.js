@@ -119,36 +119,53 @@ router.post('/webhook', async (req, res) => {
         if (eventName === 'order_created' && userId) {
             const now = new Date();
 
-            // Fetch existing user so we can merge modules and extend expiry
-            const existingUser = await User.findById(userId).select('subscribedModules subscriptionExpiry isSubscribed');
+            // Load full user (we need moduleAccess Map)
+            const existingUser = await User.findById(userId);
             if (!existingUser) {
                 console.warn(`Webhook: user ${userId} not found`);
                 return res.status(200).json({ received: true });
             }
 
-            // Merge module list (union of old + new)
-            const existingModules = existingUser.subscribedModules || [];
-            const mergedModules   = Array.from(new Set([...existingModules, ...modules]));
+            // For each purchased module, extend or set its own expiry
+            const addMs = months * 30 * 24 * 60 * 60 * 1000;
 
-            // Extend expiry: if active sub exists, add new months to current expiry;
-            // otherwise start from now
-            const baseDate = (existingUser.isSubscribed
-                              && existingUser.subscriptionExpiry
-                              && existingUser.subscriptionExpiry > now)
-                             ? existingUser.subscriptionExpiry
-                             : now;
-            const expiry = new Date(baseDate.getTime() + months * 30 * 24 * 60 * 60 * 1000);
+            if (!existingUser.moduleAccess) existingUser.moduleAccess = new Map();
 
-            await User.findByIdAndUpdate(userId, {
-                isSubscribed:       true,
-                subscriptionPlan:   customData.plan || 'custom',
-                subscriptionExpiry: expiry,
-                subscriptionStart:  existingUser.subscriptionStart || now,
-                subscribedModules:  mergedModules,
-                lsOrderId:          String(event.data?.id || ''),
-            });
+            for (const mod of modules) {
+                const current = existingUser.moduleAccess.get(mod);
+                const baseDate = (current && current.expiry && current.expiry > now)
+                                 ? current.expiry
+                                 : now;
+                const newExpiry = new Date(baseDate.getTime() + addMs);
 
-            console.log(`Subscription activated: userId=${userId} modules=${mergedModules} expires=${expiry.toISOString()}`);
+                existingUser.moduleAccess.set(mod, {
+                    expiry:      newExpiry,
+                    plan:        customData.plan || `${months}month`,
+                    purchasedAt: now,
+                    months:      months,
+                });
+            }
+
+            // Recompute global fields from moduleAccess (kept for legacy clients)
+            const activeMods = [];
+            let latestExpiry = null;
+            for (const [mod, info] of existingUser.moduleAccess.entries()) {
+                if (info.expiry && info.expiry > now) {
+                    activeMods.push(mod);
+                    if (!latestExpiry || info.expiry > latestExpiry) latestExpiry = info.expiry;
+                }
+            }
+
+            existingUser.isSubscribed       = activeMods.length > 0;
+            existingUser.subscribedModules  = activeMods;
+            existingUser.subscriptionExpiry = latestExpiry;
+            existingUser.subscriptionPlan   = customData.plan || 'custom';
+            existingUser.subscriptionStart  = existingUser.subscriptionStart || now;
+            existingUser.lsOrderId          = String(event.data?.id || '');
+
+            await existingUser.save();
+
+            console.log(`Subscription activated: userId=${userId} modules=${activeMods} per-module access updated`);
         }
 
         res.status(200).json({ received: true });
@@ -162,22 +179,50 @@ router.post('/webhook', async (req, res) => {
 // ── GET /api/payment/status ───────────────────────────────────
 router.get('/status', authMiddleware, async (req, res) => {
     try {
-        const user = await User.findById(req.user.userId)
-            .select('isSubscribed subscriptionPlan subscriptionExpiry subscribedModules');
-
+        const user = await User.findById(req.user.userId);
         if (!user) return res.status(404).json({ error: 'User not found.' });
 
         const now = new Date();
-        if (user.isSubscribed && user.subscriptionExpiry && now > user.subscriptionExpiry) {
-            await User.findByIdAndUpdate(req.user.userId, { isSubscribed: false });
-            return res.json({ isSubscribed: false, expired: true });
+
+        // Build per-module access object, filtering out expired ones
+        const moduleAccess = {};
+        const activeModules = [];
+        let latestExpiry = null;
+
+        if (user.moduleAccess) {
+            for (const [mod, info] of user.moduleAccess.entries()) {
+                if (info.expiry && info.expiry > now) {
+                    moduleAccess[mod] = {
+                        expiry:      info.expiry,
+                        plan:        info.plan,
+                        purchasedAt: info.purchasedAt,
+                        daysLeft:    Math.ceil((info.expiry - now) / (1000 * 60 * 60 * 24)),
+                    };
+                    activeModules.push(mod);
+                    if (!latestExpiry || info.expiry > latestExpiry) latestExpiry = info.expiry;
+                }
+            }
+        }
+
+        // Sync legacy fields if they drifted
+        const needsSync =
+            user.isSubscribed       !== (activeModules.length > 0) ||
+            user.subscribedModules?.length !== activeModules.length ||
+            !activeModules.every(m => user.subscribedModules.includes(m));
+
+        if (needsSync) {
+            user.isSubscribed       = activeModules.length > 0;
+            user.subscribedModules  = activeModules;
+            user.subscriptionExpiry = latestExpiry;
+            await user.save();
         }
 
         res.json({
-            isSubscribed: user.isSubscribed  || false,
-            plan:         user.subscriptionPlan   || null,
-            expiry:       user.subscriptionExpiry || null,
-            modules:      user.subscribedModules  || [],
+            isSubscribed: activeModules.length > 0,
+            plan:         user.subscriptionPlan || null,
+            expiry:       latestExpiry,
+            modules:      activeModules,
+            moduleAccess,
         });
 
     } catch (err) {
