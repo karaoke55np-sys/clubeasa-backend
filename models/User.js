@@ -6,9 +6,10 @@ const userSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     password: { type: String, required: true, minlength: 6 },
     isSubscribed: { type: Boolean, default: false },
-    subscriptionPlan: { type: String, enum: ['monthly', 'bimonthly', 'quarterly', null], default: null },
+    subscriptionPlan: { type: String, default: null },
     subscriptionStart: { type: Date, default: null },
     subscriptionExpiry: { type: Date, default: null },
+    subscribedModules: { type: [String], default: [] },
     lsOrderId: { type: String, default: null },
     resetPasswordToken: { type: String, default: null },
     resetPasswordExpiry: { type: Date, default: null }

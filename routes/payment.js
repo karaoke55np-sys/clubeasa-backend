@@ -117,19 +117,38 @@ router.post('/webhook', async (req, res) => {
         console.log(`Webhook: ${eventName} | userId=${userId} | modules=${modules} | months=${months}`);
 
         if (eventName === 'order_created' && userId) {
-            const now    = new Date();
-            const expiry = new Date(now.getTime() + months * 30 * 24 * 60 * 60 * 1000);
+            const now = new Date();
+
+            // Fetch existing user so we can merge modules and extend expiry
+            const existingUser = await User.findById(userId).select('subscribedModules subscriptionExpiry isSubscribed');
+            if (!existingUser) {
+                console.warn(`Webhook: user ${userId} not found`);
+                return res.status(200).json({ received: true });
+            }
+
+            // Merge module list (union of old + new)
+            const existingModules = existingUser.subscribedModules || [];
+            const mergedModules   = Array.from(new Set([...existingModules, ...modules]));
+
+            // Extend expiry: if active sub exists, add new months to current expiry;
+            // otherwise start from now
+            const baseDate = (existingUser.isSubscribed
+                              && existingUser.subscriptionExpiry
+                              && existingUser.subscriptionExpiry > now)
+                             ? existingUser.subscriptionExpiry
+                             : now;
+            const expiry = new Date(baseDate.getTime() + months * 30 * 24 * 60 * 60 * 1000);
 
             await User.findByIdAndUpdate(userId, {
                 isSubscribed:       true,
                 subscriptionPlan:   customData.plan || 'custom',
                 subscriptionExpiry: expiry,
-                subscriptionStart:  now,
-                subscribedModules:  modules,
+                subscriptionStart:  existingUser.subscriptionStart || now,
+                subscribedModules:  mergedModules,
                 lsOrderId:          String(event.data?.id || ''),
             });
 
-            console.log(`Subscription activated: userId=${userId} modules=${modules} expires=${expiry.toISOString()}`);
+            console.log(`Subscription activated: userId=${userId} modules=${mergedModules} expires=${expiry.toISOString()}`);
         }
 
         res.status(200).json({ received: true });
