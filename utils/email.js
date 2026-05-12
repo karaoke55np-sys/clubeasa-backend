@@ -1,46 +1,28 @@
-// utils/email.js — Gmail SMTP via nodemailer
-const nodemailer = require('nodemailer');
+// utils/email.js — Resend HTTPS API
+const { Resend } = require('resend');
 
-let transporter = null;
+let resendClient = null;
 
-function getTransporter() {
-    if (transporter) return transporter;
-
-    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-        console.warn('⚠️  EMAIL_USER / EMAIL_PASS not configured — email sending disabled');
+function getClient() {
+    if (resendClient) return resendClient;
+    if (!process.env.RESEND_API_KEY) {
+        console.warn('⚠️  RESEND_API_KEY not configured — email sending disabled');
         return null;
     }
-
-    // Explicit SMTP config (instead of service:'gmail') so we can:
-    //   1. Force IPv4 — Render's free tier blocks outbound IPv6 to Gmail SMTP
-    //   2. Use port 587 (STARTTLS) which works reliably on cloud hosts
-    transporter = nodemailer.createTransport({
-        host:   'smtp.gmail.com',
-        port:   587,
-        secure: false,        // false = STARTTLS upgrade on port 587
-        family: 4,            // force IPv4 (fixes ENETUNREACH on Render)
-        auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS,
-        },
-        tls: {
-            // Helps with cert chain on some hosts
-            minVersion: 'TLSv1.2',
-        },
-        connectionTimeout: 15000,
-        greetingTimeout:   15000,
-        socketTimeout:     20000,
-    });
-
-    return transporter;
+    resendClient = new Resend(process.env.RESEND_API_KEY);
+    return resendClient;
 }
 
-const FROM = process.env.EMAIL_FROM || `clubeasa <${process.env.EMAIL_USER}>`;
+// Default "from" address.
+// Until you verify your own domain (clubeasa.com) at https://resend.com/domains,
+// Resend only lets you send FROM onboarding@resend.dev.
+// Once domain is verified, set EMAIL_FROM env var to e.g. "clubeasa <noreply@clubeasa.com>"
+const FROM = process.env.EMAIL_FROM || 'clubeasa <onboarding@resend.dev>';
 
 // ── Send verification email ──────────────────────────────────
 async function sendVerificationEmail(to, name, verifyUrl) {
-    const t = getTransporter();
-    if (!t) throw new Error('Email service not configured');
+    const client = getClient();
+    if (!client) throw new Error('Email service not configured');
 
     const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;max-width:600px;margin:auto;padding:24px;background:#0a0e27;color:#fff;">
@@ -89,19 +71,25 @@ If you did not create a clubeasa account, you can safely ignore this email.
 
 — clubeasa`;
 
-    await t.sendMail({
+    const { data, error } = await client.emails.send({
         from:    FROM,
         to,
         subject: 'Verify your clubeasa email',
         text,
         html,
     });
+
+    if (error) {
+        console.error('Resend send error:', error);
+        throw new Error(error.message || 'Failed to send email');
+    }
+    return data;
 }
 
 // ── Send password reset email ────────────────────────────────
 async function sendPasswordResetEmail(to, name, resetUrl) {
-    const t = getTransporter();
-    if (!t) throw new Error('Email service not configured');
+    const client = getClient();
+    if (!client) throw new Error('Email service not configured');
 
     const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;max-width:600px;margin:auto;padding:24px;background:#0a0e27;color:#fff;">
@@ -145,13 +133,19 @@ This link expires in 1 hour. If you did not request this, you can safely ignore 
 
 — clubeasa`;
 
-    await t.sendMail({
+    const { data, error } = await client.emails.send({
         from:    FROM,
         to,
         subject: 'Reset your clubeasa password',
         text,
         html,
     });
+
+    if (error) {
+        console.error('Resend send error:', error);
+        throw new Error(error.message || 'Failed to send email');
+    }
+    return data;
 }
 
 function escapeHtml(s) {
