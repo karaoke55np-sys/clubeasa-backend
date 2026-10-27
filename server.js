@@ -7,9 +7,6 @@ dotenv.config();
 
 const app = express();
 
-// ── Webhook route needs raw body BEFORE express.json() ──────
-app.use('/api/payment/webhook', express.raw({ type: 'application/json' }));
-
 // ── CORS: accept multiple origins ────────────────────────────
 // CORS_ORIGINS can be a single URL or a comma-separated list.
 // Falls back to FRONTEND_URL (used for email links) then localhost.
@@ -17,7 +14,15 @@ app.use('/api/payment/webhook', express.raw({ type: 'application/json' }));
 const rawOrigins = process.env.CORS_ORIGINS
     || process.env.FRONTEND_URL
     || 'http://localhost:3000';
-const allowedOrigins = rawOrigins.split(',').map(o => o.trim()).filter(Boolean);
+const allowedOrigins = rawOrigins.split(',').map(o => o.trim().replace(/\/+$/, '')).filter(Boolean);
+// Accept both https://example.com and https://www.example.com for every listed origin
+for (const o of [...allowedOrigins]) {
+    const m = o.match(/^(https?:\/\/)(www\.)?(.+)$/i);
+    if (m) {
+        const alt = m[2] ? `${m[1]}${m[3]}` : `${m[1]}www.${m[3]}`;
+        if (!allowedOrigins.includes(alt)) allowedOrigins.push(alt);
+    }
+}
 
 app.use(cors({
     origin: function (origin, callback) {
@@ -48,6 +53,7 @@ app.use('/api/auth',           require('./routes/auth'));
 app.use('/api/payment',        require('./routes/payment'));
 app.use('/api/user',           require('./routes/user'));
 app.use('/api/password-reset', require('./routes/passwordReset'));
+app.use('/api/admin',          require('./routes/admin'));
 
 // ── Health check ─────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
