@@ -42,6 +42,8 @@ function requireAdmin(req, res, next) {
     }
 }
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
 // Shape used by admin.html
 function serializeUser(user) {
     const now = new Date();
@@ -50,8 +52,17 @@ function serializeUser(user) {
     let latest = null;
     if (user.moduleAccess) {
         for (const [mod, info] of user.moduleAccess.entries()) {
-            moduleAccess[mod] = { expiry: info.expiry, plan: info.plan, months: info.months, note: info.note };
-            if (info.expiry && info.expiry > now) {
+            const active = !!(info.expiry && info.expiry > now);
+            moduleAccess[mod] = {
+                expiry: info.expiry,
+                plan: info.plan,
+                months: info.months,
+                note: info.note,
+                purchasedAt: info.purchasedAt,
+                active,
+                daysLeft: info.expiry ? Math.ceil((info.expiry - now) / MS_PER_DAY) : null,
+            };
+            if (active) {
                 modules.push(mod);
                 if (!latest || info.expiry > latest) latest = info.expiry;
             }
@@ -66,7 +77,26 @@ function serializeUser(user) {
         modules,
         expiry: latest,
         moduleAccess,
+        createdAt: user.createdAt,
     };
+}
+
+// Recompute the legacy global subscription fields from moduleAccess
+function syncLegacyFields(user, plan) {
+    const now = new Date();
+    const active = [];
+    let latest = null;
+    for (const [mod, info] of user.moduleAccess.entries()) {
+        if (info.expiry && info.expiry > now) {
+            active.push(mod);
+            if (!latest || info.expiry > latest) latest = info.expiry;
+        }
+    }
+    user.isSubscribed       = active.length > 0;
+    user.subscribedModules  = active;
+    user.subscriptionExpiry = latest;
+    if (plan) user.subscriptionPlan = plan;
+    user.subscriptionStart  = user.subscriptionStart || now;
 }
 
 // ── POST /api/admin/login  { password } ──────────────────────
@@ -134,20 +164,7 @@ router.post('/grant-access', requireAdmin, async (req, res) => {
             });
         }
 
-        // Recompute legacy global fields
-        const active = [];
-        let latest = null;
-        for (const [mod, info] of user.moduleAccess.entries()) {
-            if (info.expiry && info.expiry > now) {
-                active.push(mod);
-                if (!latest || info.expiry > latest) latest = info.expiry;
-            }
-        }
-        user.isSubscribed       = active.length > 0;
-        user.subscribedModules  = active;
-        user.subscriptionExpiry = latest;
-        user.subscriptionPlan   = 'khalti-manual';
-        user.subscriptionStart  = user.subscriptionStart || now;
+        syncLegacyFields(user, 'khalti-manual');
 
         await user.save();
         console.log(`ADMIN GRANT: ${email} modules=${modules} months=${months} note="${note}"`);
@@ -159,4 +176,117 @@ router.post('/grant-access', requireAdmin, async (req, res) => {
     }
 });
 
+// ── GET /api/admin/users?status=all|active|expiring|expired|none&q= ──
+// Lists customers with their per-module access, newest activity first.
+router.get('/users', requireAdmin, async (req, res) => {
+    try {
+        const status = String(req.query.status || 'all');
+        const q      = String(req.query.q || '').trim().toLowerCase();
+        const filter = {};
+        if (q) {
+            const safe = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            filter.$or = [{ email: { $regex: safe, $options: 'i' } }, { name: { $regex: safe, $options: 'i' } }];
+        }
+        const users = await User.find(filter)
+            .select('name email isVerified moduleAccess createdAt')
+            .sort({ updatedAt: -1 })
+            .limit(1000);
+
+        const rows = users.map(serializeUser);
+        const hasAny   = u => Object.keys(u.moduleAccess).length > 0;
+        const soonest  = u => Math.min(...Object.values(u.moduleAccess).filter(m => m.active).map(m => m.daysLeft));
+        const filtered = rows.filter(u => {
+            if (status === 'active')   return u.modules.length > 0;
+            if (status === 'expiring') return u.modules.length > 0 && soonest(u) <= 7;
+            if (status === 'expired')  return hasAny(u) && u.modules.length === 0;
+            if (status === 'none')     return !hasAny(u);
+            return true;
+        });
+
+        const all = rows;
+        const stats = {
+            totalUsers:     all.length,
+            activeCustomers: all.filter(u => u.modules.length > 0).length,
+            expiringSoon:   all.filter(u => u.modules.length > 0 && soonest(u) <= 7).length,
+            expired:        all.filter(u => hasAny(u) && u.modules.length === 0).length,
+            activeByModule: Object.fromEntries(VALID_MODULES.map(m => [m, all.filter(u => u.modules.includes(m)).length])),
+        };
+
+        res.json({ users: filtered, stats });
+    } catch (err) {
+        console.error('admin list error:', err.message);
+        res.status(500).json({ error: 'Could not load customers.' });
+    }
+});
+
+// ── POST /api/admin/adjust  { email, module, days, note } ──
+// Positive days extend access (from the current expiry if still active,
+// otherwise from today). Negative days shorten it.
+router.post('/adjust', requireAdmin, async (req, res) => {
+    try {
+        const email  = String(req.body.email || '').toLowerCase().trim();
+        const mod    = String(req.body.module || '');
+        const days   = parseInt(req.body.days, 10);
+        const note   = String(req.body.note || '').slice(0, 200);
+
+        if (!email || !mod || !days) return res.status(400).json({ error: 'email, module and days are required.' });
+        if (!VALID_MODULES.includes(mod)) return res.status(400).json({ error: `Invalid module. Allowed: ${VALID_MODULES.join(', ')}` });
+        if (Math.abs(days) > 730) return res.status(400).json({ error: 'days must be between -730 and 730.' });
+
+        const user = await User.findOne({ email });
+        if (!user) return res.status(404).json({ error: 'User not found.' });
+        if (!user.moduleAccess) user.moduleAccess = new Map();
+
+        const now     = new Date();
+        const current = user.moduleAccess.get(mod);
+        if (!current && days < 0) return res.status(400).json({ error: 'This user has no access to shorten for that module.' });
+
+        const base      = (current && current.expiry && current.expiry > now) ? current.expiry : now;
+        const newExpiry = new Date(base.getTime() + days * MS_PER_DAY);
+
+        user.moduleAccess.set(mod, {
+            expiry:      newExpiry,
+            plan:        days > 0 ? 'extension' : (current?.plan || 'adjusted'),
+            purchasedAt: current?.purchasedAt || now,
+            months:      current?.months || Math.max(1, Math.round(days / 30)),
+            note:        note || current?.note || '',
+        });
+        syncLegacyFields(user);
+        await user.save();
+        console.log(`ADMIN ADJUST: ${email} module=${mod} days=${days} newExpiry=${newExpiry.toISOString()} note="${note}"`);
+
+        res.json({ success: true, user: serializeUser(user) });
+    } catch (err) {
+        console.error('admin adjust error:', err.message);
+        res.status(500).json({ error: 'Could not change access.' });
+    }
+});
+
+// ── POST /api/admin/revoke  { email, module } ──
+router.post('/revoke', requireAdmin, async (req, res) => {
+    try {
+        const email = String(req.body.email || '').toLowerCase().trim();
+        const mod   = String(req.body.module || '');
+        if (!email || !mod) return res.status(400).json({ error: 'email and module are required.' });
+
+        const user = await User.findOne({ email });
+        if (!user) return res.status(404).json({ error: 'User not found.' });
+        if (!user.moduleAccess || !user.moduleAccess.get(mod)) return res.status(400).json({ error: 'User has no access to that module.' });
+
+        const info = user.moduleAccess.get(mod);
+        user.moduleAccess.set(mod, {
+            expiry: new Date(), plan: 'revoked', purchasedAt: info.purchasedAt, months: info.months,
+            note: `revoked ${new Date().toISOString().slice(0, 10)}${info.note ? ' · ' + info.note : ''}`.slice(0, 200),
+        });
+        syncLegacyFields(user);
+        await user.save();
+        console.log(`ADMIN REVOKE: ${email} module=${mod}`);
+        res.json({ success: true, user: serializeUser(user) });
+    } catch (err) {
+        console.error('admin revoke error:', err.message);
+        res.status(500).json({ error: 'Could not revoke access.' });
+    }
+});
+
 module.exports = router;
+
